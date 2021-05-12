@@ -14,20 +14,32 @@ import com.azure.communication.callingserver.implementation.models.StartCallReco
 import com.azure.communication.callingserver.models.GetCallRecordingStateResponse;
 import com.azure.communication.callingserver.models.JoinCallOptions;
 import com.azure.communication.callingserver.models.JoinCallResponse;
+import com.azure.communication.callingserver.models.ParallelDownloadOptions;
 import com.azure.communication.callingserver.models.StartCallRecordingResponse;
 import com.azure.communication.common.CommunicationIdentifier;
 import com.azure.core.annotation.ReturnType;
 import com.azure.core.annotation.ServiceClient;
 import com.azure.core.annotation.ServiceMethod;
+import com.azure.core.http.HttpRange;
 import com.azure.core.http.rest.Response;
 import com.azure.core.http.rest.SimpleResponse;
 import com.azure.core.util.Context;
 import com.azure.core.util.logging.ClientLogger;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousFileChannel;
+import java.nio.file.OpenOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.InvalidParameterException;
+import java.util.HashSet;
 import java.util.Objects;
+import java.util.Set;
 
 import static com.azure.core.util.FluxUtil.withContext;
 import static com.azure.core.util.FluxUtil.monoError;
@@ -39,9 +51,14 @@ import static com.azure.core.util.FluxUtil.monoError;
 public final class ConversationAsyncClient {
     private final ConversationsImpl conversationsClient;
     private final ClientLogger logger = new ClientLogger(ConversationAsyncClient.class);
+    private final ContentDownloader contentDownloader;
 
     ConversationAsyncClient(AzureCommunicationCallingServerServiceImpl conversationServiceClient) {
         conversationsClient = conversationServiceClient.getConversations();
+        contentDownloader = new ContentDownloader(
+            conversationServiceClient.getEndpoint(),
+            conversationServiceClient.getHttpPipeline(),
+            logger);
     }
 
     /**
@@ -246,7 +263,7 @@ public final class ConversationAsyncClient {
      */
     @ServiceMethod(returns = ReturnType.SINGLE)
     public Mono<Response<StartCallRecordingResponse>> startRecordingWithResponse(String conversationId,
-        URI recordingStateCallbackUri) {    
+        URI recordingStateCallbackUri) {
         return startRecordingWithResponse(conversationId, recordingStateCallbackUri, null);
     }
 
@@ -310,7 +327,7 @@ public final class ConversationAsyncClient {
             return withContext(contextValue -> {
                 if (context != null) {
                     contextValue = context;
-                }            
+                }
                 return this.conversationsClient.stopRecordingWithResponseAsync(conversationId, recordingId);
             });
         } catch (RuntimeException ex) {
@@ -355,7 +372,7 @@ public final class ConversationAsyncClient {
             return withContext(contextValue -> {
                 if (context != null) {
                     contextValue = context;
-                } 
+                }
                 return this.conversationsClient.pauseRecordingWithResponseAsync(conversationId, recordingId);
             });
         } catch (RuntimeException ex) {
@@ -400,7 +417,7 @@ public final class ConversationAsyncClient {
             return withContext(contextValue -> {
                 if (context != null) {
                     contextValue = context;
-                }             
+                }
                 return this.conversationsClient.resumeRecordingWithResponseAsync(conversationId, recordingId);
             });
         } catch (RuntimeException ex) {
@@ -450,7 +467,7 @@ public final class ConversationAsyncClient {
             return withContext(contextValue -> {
                 if (context != null) {
                     contextValue = context;
-                } 
+                }
                 return this.conversationsClient.recordingStateWithResponseAsync(conversationId, recordingId)
                         .flatMap((Response<GetCallRecordingStateResponse> response) -> {
                             return Mono.just(new SimpleResponse<>(response, response.getValue()));
@@ -463,7 +480,7 @@ public final class ConversationAsyncClient {
 
     /**
      * Play audio in a call.
-     * 
+     *
      * @param conversationId The conversation id.
      * @param audioFileUri The uri of the audio file .
      * @param audioFileId Tne id for the media in the AudioFileUri, using which we cache the media resource.
@@ -481,7 +498,7 @@ public final class ConversationAsyncClient {
             PlayAudioRequest playAudioRequest = new PlayAudioRequest().
                 setAudioFileUri(audioFileUri).setLoop(false).setAudioFileId(audioFileId).setCallbackUri(callbackUri).setOperationContext(operationContext);
             return playAudio(conversationId, playAudioRequest);
-            
+
         } catch (RuntimeException ex) {
             return monoError(logger, ex);
         }
@@ -493,7 +510,7 @@ public final class ConversationAsyncClient {
             Objects.requireNonNull(request, "'request' cannot be null.");
 
             return this.conversationsClient.playAudioAsync(conversationId, request).flatMap(
-                (PlayAudioResponse response) -> {                    
+                (PlayAudioResponse response) -> {
                     return Mono.just(response);
                 });
         } catch (RuntimeException ex) {
@@ -512,7 +529,7 @@ public final class ConversationAsyncClient {
      */
     @ServiceMethod(returns = ReturnType.SINGLE)
     public Mono<Response<PlayAudioResponse>> playAudioWithResponse(String conversationId, String audioFileUri, String audioFileId, String callbackUri, String operationContext) {
-        
+
         //Currently we do not support loop on the audio media for out-call, thus setting the loop to false
         PlayAudioRequest playAudioRequest = new PlayAudioRequest().
             setAudioFileUri(audioFileUri).setLoop(false).setAudioFileId(audioFileId).setCallbackUri(callbackUri).setOperationContext(operationContext);
@@ -534,6 +551,187 @@ public final class ConversationAsyncClient {
             });
         } catch (RuntimeException ex) {
             return monoError(logger, ex);
+        }
+    }
+
+    /**
+     * Download the recording content, e.g. Recording's metadata, Recording video, from the ACS endpoint
+     * passed as parameter.
+     * @param endpoint - URL where the content is located.
+     * @return A {@link Mono} object containing the byte stream of the content requested.
+     */
+    @ServiceMethod(returns = ReturnType.SINGLE)
+    public Mono<Flux<ByteBuffer>> downloadStreaming(URI endpoint) {
+        return downloadStreamingWithResponse(endpoint, null).map(Response::getValue);
+    }
+
+    /**
+     * Download the recording content, e.g. Recording's metadata, Recording video, from the ACS endpoint
+     * passed as parameter.
+     * @param endpoint - URL where the content is located.
+     * @param httpRange - An optional {@link HttpRange} value containing the range of bytes to download. If missing,
+     *                  the whole content will be downloaded.
+     * @return A {@link Mono} object containing the byte stream of the content requested.
+     */
+    @ServiceMethod(returns = ReturnType.SINGLE)
+    public Mono<Flux<ByteBuffer>> downloadStreaming(URI endpoint, HttpRange httpRange) {
+        return downloadStreamingWithResponse(endpoint, httpRange).map(Response::getValue);
+    }
+
+    /**
+     * Download the recording content, (e.g. Recording's metadata, Recording video, etc.) from the {@code endpoint}.
+     * @param endpoint - URL where the content is located.
+     * @param range - An optional {@link HttpRange} value containing the range of bytes to download. If missing,
+     *                  the whole content will be downloaded.
+     * @return A {@link Mono} object containing a {@link Response} with the byte stream of the content requested.
+     */
+    @ServiceMethod(returns = ReturnType.SINGLE)
+    public Mono<Response<Flux<ByteBuffer>>> downloadStreamingWithResponse(URI endpoint, HttpRange range) {
+        return downloadStreamingWithResponse(endpoint, range, null);
+    }
+
+    Mono<Response<Flux<ByteBuffer>>> downloadStreamingWithResponse(URI endpoint, HttpRange range, Context context) {
+        try {
+            Objects.requireNonNull(endpoint, "'endpoint' cannot be null");
+            return contentDownloader.downloadStreamingWithResponse(endpoint, range, context);
+        } catch (RuntimeException ex) {
+            return monoError(logger, ex);
+        }
+    }
+
+    /**
+     * Download the recording content (e.g. Recording's metadata, Recording video, etc.) from the {@code endpoint}
+     * and written into the {@code stream}.
+     * @param stream - Stream to write the content to.
+     * @param endpoint - Location of the recording's content.
+     * @param range - An optional {@link HttpRange} value containing the range of bytes to download. If missing,
+     *                  the whole content will be downloaded.
+     * @param parallelDownloadOptions - An optional {@link ParallelDownloadOptions} object to modify how the
+     *                               parallel download will work.
+     * @return An empty {@link Mono} object.
+     */
+    @ServiceMethod(returns = ReturnType.SINGLE)
+    Mono<Void> downloadTo(
+        OutputStream stream,
+        URI endpoint,
+        HttpRange range,
+        ParallelDownloadOptions parallelDownloadOptions) {
+
+        return Mono.defer(() -> {
+            downloadToWithResponse(stream, endpoint, range, parallelDownloadOptions).block();
+            return Mono.empty();
+        });
+    }
+
+    /**
+     * Download the recording content (e.g. Recording's metadata, Recording video, etc.) from the {@code endpoint}
+     * and written into the {@code stream}.
+     * @param stream - Stream to write the content to.
+     * @param endpoint - Location of the recording's content.
+     * @param range - An optional {@link HttpRange} value containing the range of bytes to download. If missing,
+     *                  the whole content will be downloaded.
+     * @param parallelDownloadOptions - An optional {@link ParallelDownloadOptions} object to modify how the
+     *                               parallel download will work.
+     * @return A {@link Mono} object containing the http response information from the download.
+     */
+    @ServiceMethod(returns = ReturnType.SINGLE)
+    public Mono<Response<Void>> downloadToWithResponse(
+        OutputStream stream,
+        URI endpoint,
+        HttpRange range,
+        ParallelDownloadOptions parallelDownloadOptions) {
+
+        return downloadToWithResponse(stream, endpoint, range, parallelDownloadOptions, null);
+    }
+
+    Mono<Response<Void>> downloadToWithResponse(
+        OutputStream stream,
+        URI endpoint,
+        HttpRange range,
+        ParallelDownloadOptions parallelDownloadOptions,
+        Context context) {
+        HttpRange finalRange = range == null ? new HttpRange(0) : range;
+        ParallelDownloadOptions finalParallelDownloadOptions =
+            parallelDownloadOptions == null
+                ? new ParallelDownloadOptions()
+                : parallelDownloadOptions;
+
+        return contentDownloader.downloadToStream(stream, endpoint, finalRange, finalParallelDownloadOptions, context);
+    }
+
+    /**
+     * Download the recording content (e.g. Recording's metadata, Recording video, etc.) from the {@code endpoint}
+     * and stored into the file in {@code path}.
+     * @param path - File path to store file to.
+     * @param endpoint - Location of the recording's content.
+     * @param range - An optional {@link HttpRange} value containing the range of bytes to download. If missing,
+     *                  the whole content will be downloaded.
+     * @param parallelDownloadOptions - An optional {@link ParallelDownloadOptions} object to modify how the
+     *                               parallel download will work.
+     * @param overwrite - True to overwrite the file if it exists.
+     * @return An empty {@link Mono} object.
+     */
+    @ServiceMethod(returns = ReturnType.SINGLE)
+    public Mono<Void> downloadTo(
+        Path path,
+        URI endpoint,
+        HttpRange range,
+        ParallelDownloadOptions parallelDownloadOptions,
+        boolean overwrite) {
+        return downloadToWithResponse(path, endpoint, range, parallelDownloadOptions, overwrite)
+            .map(Response::getValue);
+    }
+
+    /**
+     * Download the recording content (e.g. Recording's metadata, Recording video, etc.) from the {@code endpoint}
+     * and stored into the file in {@code path}.
+     * @param path - File path to store file to.
+     * @param endpoint - Location of the recording's content.
+     * @param range - An optional {@link HttpRange} value containing the range of bytes to download. If missing,
+     *                  the whole content will be downloaded.
+     * @param parallelDownloadOptions - An optional {@link ParallelDownloadOptions} object to modify how the
+     *                               parallel download will work.
+     * @param overwrite - True to overwrite the file if it exists.
+     * @return A {@link Mono} object containing the http response information from the download.
+     */
+    @ServiceMethod(returns = ReturnType.SINGLE)
+    public Mono<Response<Void>> downloadToWithResponse(
+        Path path,
+        URI endpoint,
+        HttpRange range,
+        ParallelDownloadOptions parallelDownloadOptions,
+        boolean overwrite) {
+        return downloadToWithResponse(path, endpoint, range, parallelDownloadOptions, overwrite, null);
+    }
+
+    Mono<Response<Void>> downloadToWithResponse(
+        Path path,
+        URI endpoint,
+        HttpRange range,
+        ParallelDownloadOptions parallelDownloadOptions,
+        boolean overwrite,
+        Context context) {
+        HttpRange finalRange = range == null ? new HttpRange(0) : range;
+        ParallelDownloadOptions finalParallelDownloadOptions =
+            parallelDownloadOptions == null
+                ? new ParallelDownloadOptions()
+                : parallelDownloadOptions;
+        Set<OpenOption> openOptions = new HashSet<>();
+
+        if (overwrite) {
+            openOptions.add(StandardOpenOption.CREATE);
+        } else {
+            openOptions.add(StandardOpenOption.CREATE_NEW);
+        }
+        openOptions.add(StandardOpenOption.WRITE);
+
+        try {
+            AsynchronousFileChannel file = AsynchronousFileChannel.open(path, openOptions, null);
+            return Mono.just(file).flatMap(
+                c -> contentDownloader.downloadToFile(c, endpoint, finalRange, finalParallelDownloadOptions, context))
+                .doFinally(signalType -> contentDownloader.downloadToFileCleanup(file, path, signalType));
+        } catch (IOException ex) {
+            return monoError(logger, new RuntimeException(ex));
         }
     }
 }

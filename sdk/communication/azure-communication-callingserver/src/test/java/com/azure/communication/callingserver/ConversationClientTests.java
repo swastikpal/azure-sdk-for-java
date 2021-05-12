@@ -34,7 +34,7 @@ public class ConversationClientTests extends CallingServerTestBase {
     public void runAllClientFunctions(HttpClient httpClient) throws URISyntaxException, InterruptedException {
         ConversationClientBuilder builder = getConversationClientUsingConnectionString(httpClient);
         ConversationClient conversationAsyncClient = setupClient(builder, "runAllClientFunctions");
-        String recordingId = "";        
+        String recordingId = "";
         URI recordingStateCallbackUri = new URI("https://dev.skype.net:6448");
 
         try {
@@ -60,7 +60,7 @@ public class ConversationClientTests extends CallingServerTestBase {
     public void runAllClientFunctionsWithResponse(HttpClient httpClient) throws URISyntaxException, InterruptedException {
         ConversationClientBuilder builder = getConversationClientUsingConnectionString(httpClient);
         ConversationClient conversationClient = setupClient(builder, "runAllClientFunctionsWithResponse");
-        String recordingId = "";        
+        String recordingId = "";
         URI recordingStateCallbackUri = new URI("https://dev.skype.net:6448");
         System.out.println("conversationId: " + conversationId);
 
@@ -90,14 +90,14 @@ public class ConversationClientTests extends CallingServerTestBase {
         ConversationClientBuilder builder = getConversationClientUsingConnectionString(httpClient);
         ConversationClient conversationAsyncClient = setupClient(builder, "runPlayAudioFunction");
         var operationContext = "ac794123-3820-4979-8e2d-50c7d3e07b12";
-        String audioFileUri =  "https://host.app/audio/bot-callcenter-intro.wav";      
+        String audioFileUri =  "https://host.app/audio/bot-callcenter-intro.wav";
         String callbackUri = "https://dev.skype.net:6448";
-        
+
         System.out.println("conversationId: " + conversationId);
         try {
             PlayAudioResponse playAudioResponse = conversationAsyncClient.playAudio(conversationId, audioFileUri, UUID.randomUUID().toString(), callbackUri, operationContext);
             CallingServerTestUtils.validatePlayAudioResult(playAudioResponse, operationContext);
-           
+
         } catch (Exception e) {
             System.out.println("Error: " + e.getMessage());
             throw e;
@@ -110,14 +110,14 @@ public class ConversationClientTests extends CallingServerTestBase {
         ConversationClientBuilder builder = getConversationClientUsingConnectionString(httpClient);
         ConversationClient conversationAsyncClient = setupClient(builder, "runPlayAudioFunctionWithResponse");
         var operationContext = "ac794123-3820-4979-8e2d-50c7d3e07b12";
-        String audioFileUri = "https://host.app/audio/bot-callcenter-intro.wav";      
+        String audioFileUri = "https://host.app/audio/bot-callcenter-intro.wav";
         String callbackUri = "https://dev.skype.net:6448";
-        
+
         System.out.println("conversationId: " + conversationId);
         try {
             Response<PlayAudioResponse> playAudioResponse = conversationAsyncClient.playAudioWithResponse(conversationId, audioFileUri, UUID.randomUUID().toString(), callbackUri, operationContext, Context.NONE);
             CallingServerTestUtils.validatePlayAudioResponse(playAudioResponse, operationContext);
-           
+
         } catch (Exception e) {
             System.out.println("Error: " + e.getMessage());
             throw e;
@@ -129,7 +129,7 @@ public class ConversationClientTests extends CallingServerTestBase {
     public void startRecordingFails(HttpClient httpClient) throws URISyntaxException, InterruptedException {
         ConversationClientBuilder builder = getConversationClientUsingConnectionString(httpClient);
         ConversationClient conversationClient = setupClient(builder, "startRecordingFails");
-        var invalidConversationId = "aHR0cHM6Ly9jb252LXVzd2UtMDkuY29udi5za3lwZS5jb20vY29udi9EZVF2WEJGVVlFV1NNZkFXYno2azN3P2k9MTEmZT02Mzc1NzIyMjk0Mjc0NTI4Nzk=";       
+        var invalidConversationId = "aHR0cHM6Ly9jb252LXVzd2UtMDkuY29udi5za3lwZS5jb20vY29udi9EZVF2WEJGVVlFV1NNZkFXYno2azN3P2k9MTEmZT02Mzc1NzIyMjk0Mjc0NTI4Nzk=";
         URI recordingStateCallbackUri = new URI("https://dev.skype.net:6448");
         System.out.println("conversationId: " + invalidConversationId);
 
@@ -140,7 +140,7 @@ public class ConversationClientTests extends CallingServerTestBase {
             assertEquals(e.getResponse().getStatusCode(), 400);
         }
     }
-    
+
     private ConversationClient setupClient(ConversationClientBuilder builder, String testName) {
         return addLoggingPolicy(builder, testName).buildClient();
     }
@@ -148,15 +148,15 @@ public class ConversationClientTests extends CallingServerTestBase {
     protected ConversationClientBuilder addLoggingPolicy(ConversationClientBuilder builder, String testName) {
         return builder.addPolicy((context, next) -> logHeaders(testName, next));
     }
-    
+
     private void validateCallRecordingState(ConversationClient conversationClient, String conversationId, String recordingId, CallRecordingState expectedCallRecordingState) throws InterruptedException {
         assertNotNull(recordingId);
         assertNotNull(conversationId);
 
-        /** 
+        /**
          * There is a delay bewteen the action and when the state is available.
          * Waiting to make sure we get the updated state, when we are running
-         * against a live service. 
+         * against a live service.
          */
         sleepIfRunningAgainstService(6000);
 
